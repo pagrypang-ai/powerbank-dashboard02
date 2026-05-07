@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, HoverTool
+from bokeh.models import ColumnDataSource, HoverTool, Range1d
 import numpy as np
 
 # 页面配置
@@ -62,9 +62,19 @@ else:
     # 获取 X 轴所有可能的分类（用于排序）
     x_range = df_raw['Capacity/mAh'].unique().tolist()
 
+    # --- 修改 3：根据 Price 数据范围设置 Y 轴留白，防止图片被截断 ---
+    price_min = df_filtered['Price'].min()
+    price_max = df_filtered['Price'].max()
+    price_padding = (price_max - price_min) * 0.2 if price_max != price_min else 10
+    y_range = Range1d(
+        start=max(0, price_min - price_padding),
+        end=price_max + price_padding
+    )
+
     # 创建 Bokeh 图表
     p = figure(
         x_range=x_range,
+        y_range=y_range,           # 修改 3：应用 Y 轴范围
         height=600,
         title="容量 vs 价格 散点图 (图片标记)",
         x_axis_label="Capacity (mAh)",
@@ -74,32 +84,31 @@ else:
         sizing_mode="stretch_width"
     )
 
-    # ================== 核心修改区域 ==================
-    
-    # 1. 绘制一个全透明的“感应散点”（用于可靠地触发悬停）
-    scatter_glyphs = p.circle(
-        x="Capacity/mAh", 
-        y="Price", 
-        source=source,
-        size=40,         # 感应区大小，可以根据图片大小微调
-        alpha=0,         # 设置为 0，完全透明不可见
-        hover_alpha=0.2, # 鼠标悬停时会微微泛灰，提示用户已选中
-        hover_color="gray"
-    )
-
-    # 2. 绘制图片散点
+    # 绘制图片散点
+    # --- 修改 2：h_units 从 "screen" 改为 "data"，避免分类轴兼容性报错 ---
     img_glyphs = p.image_url(
         url="URL of Image", 
         x="Capacity/mAh", 
         y="Price", 
         source=source,
         anchor="center",
-        w=0.4, 
-        h=30,  # 稍微调高了图片像素，原先 15 像素可能会非常扁小
+        w=0.4,
+        h=price_padding,           # 修改 2：高度与数据坐标系匹配
         w_units="data",
-        h_units="screen" 
+        h_units="data"             # 修改 2：统一使用 data 单位
     )
-    # ==================================================
+
+    # --- 修改 1：新增透明散点层，作为 HoverTool 的触发器 ---
+    # image_url glyph 不能可靠触发 HoverTool，
+    # 在相同坐标叠加透明 circle，将 Hover 绑定到它上面
+    invisible_scatter = p.circle(
+        x="Capacity/mAh",
+        y="Price",
+        source=source,
+        size=40,               # 触发区域大小（像素），覆盖图片范围
+        fill_alpha=0,          # 完全透明，用户不可见
+        line_alpha=0           # 边框也透明
+    )
 
     # 构建立体 HTML 悬停提示
     tooltips = f"""
@@ -127,8 +136,8 @@ else:
     </div>
     """
 
-    # 将 HoverTool 的 renderers 指定为透明感应区 (scatter_glyphs)
-    hover = HoverTool(renderers=[scatter_glyphs], tooltips=tooltips)
+    # --- 修改 4：HoverTool 绑定到透明散点层，而非 image_url ---
+    hover = HoverTool(renderers=[invisible_scatter], tooltips=tooltips)
     p.add_tools(hover)
 
     # 美化图表
