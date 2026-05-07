@@ -15,12 +15,16 @@ def load_data():
     sheet_url = "https://docs.google.com/spreadsheets/d/1fkMRXkdKVdYFN3d_Y7bhFtA1BGIUlA3xAG86UvvhT1w/export?format=csv&gid=0"
     df = pd.read_csv(sheet_url)
     
-    # 清洗价格列
+    # 清洗价格列：提取数字
     if 'Price' in df.columns:
         df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace('[\$,]', '', regex=True), errors='coerce')
     
-    # 将缺失值填充为空字符串，避免悬停框显示 NaN
+    # 【核心修复】先删掉没有价格或没有容量的数据（没有 X 和 Y 坐标无法画图）
+    df = df.dropna(subset=['Price', 'Capacity/mAh'])
+    
+    # 然后再将其他缺失的文本字段（如接口、尺寸等）填充为 'N/A'，确保悬停框显示整洁
     df = df.fillna('N/A')
+    
     return df
 
 try:
