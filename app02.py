@@ -14,10 +14,14 @@ def load_data():
     sheet_url = "https://docs.google.com/spreadsheets/d/1fkMRXkdKVdYFN3d_Y7bhFtA1BGIUlA3xAG86UvvhT1w/export?format=csv&gid=0"
     df = pd.read_csv(sheet_url)
     
-    # 确保 Price 是数字
+    # 【强制保护】即便你在原始数据排除了空格，这里加上 strip() 也是为了防止 CSV 导出时产生新空格
+    df.columns = df.columns.str.strip()
+    
+    # 转换价格为数字
     if 'Price' in df.columns:
         df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce')
     
+    # 【检查点】如果这里删除了所有行，说明 'Price' 或 'Capacity/mAh' 匹配失败
     df = df.dropna(subset=['Price', 'Capacity/mAh'])
     df = df.fillna('')
     return df
@@ -28,100 +32,74 @@ except Exception as e:
     st.error(f"数据读取失败: {e}")
     st.stop()
 
+# --- 侧边栏 ---
 st.sidebar.header("⚙️ 选项")
 if st.sidebar.button("🔄 刷新数据"):
     st.cache_data.clear()
     st.rerun()
 
+# 品牌筛选逻辑
 if 'Brand' in df.columns:
     all_brands = sorted(df['Brand'].unique().tolist())
     selected_brands = st.sidebar.multiselect("筛选品牌", options=all_brands, default=all_brands)
     filtered_df = df[df['Brand'].isin(selected_brands)].copy()
 else:
+    st.error(f"❌ 错误：在表格中没找到 'Brand' 列。当前列名有：{df.columns.tolist()}")
     st.stop()
 
+# 【关键排查】如果原始数据不显示，通常是 filtered_df 变成了空
 if filtered_df.empty:
-    st.warning("当前筛选无数据。")
-    st.stop()
+    st.warning("⚠️ 警告：当前筛选后的数据为空。请检查过滤器或原始表格中的价格/容量是否填写。")
+    # 即便为空，我们也继续往下走，看看底部的表格显示什么
+else:
+    # ==========================================
+    # 核心：严格匹配 x_range
+    # ==========================================
+    # 1. 强制生成绘图专用的字符串列
+    filtered_df['x_axis_str'] = filtered_df['Capacity/mAh'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
 
-# ==========================================
-# 核心修复区：严格匹配 x_range 与绘图坐标
-# ==========================================
+    # 2. 逻辑排序逻辑
+    def extract_num(s):
+        nums = re.findall(r'\d+', str(s))
+        return int(nums[0]) if nums else 0
+    filtered_df['cap_order'] = filtered_df['x_axis_str'].apply(extract_num)
+    filtered_df = filtered_df.sort_values('cap_order')
 
-# 1. 强制生成一个绝对干净的纯字符串列，用于 X 轴。
-# 去除可能因为 pandas 自动转换而产生的 ".0" 尾缀（例如 10000.0 变成 10000）
-filtered_df['x_axis_str'] = filtered_df['Capacity/mAh'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    # 3. 严格提取 x_range 刻度
+    unique_x_labels = filtered_df['x_axis_str'].unique().tolist()
+    source = ColumnDataSource(filtered_df)
 
-# 2. 提取数字以便进行从小到大的逻辑排序
-def extract_num(s):
-    nums = re.findall(r'\d+', str(s))
-    return int(nums[0]) if nums else 0
+    # 颜色与绘图
+    brands_list = filtered_df['Brand'].unique().tolist()
+    color_palette = (Category20[20] * 2)[:len(brands_list)]
+    color_map = factor_cmap('Brand', palette=color_palette, factors=brands_list)
 
-filtered_df['cap_order'] = filtered_df['x_axis_str'].apply(extract_num)
-filtered_df = filtered_df.sort_values('cap_order')
+    p = figure(x_range=unique_x_labels, height=600, sizing_mode="stretch_width", 
+               title="鼠标悬停查看详情", toolbar_location="right")
 
-# 3. 提取排序后唯一的纯文本列表，作为 Bokeh 的 x_range
-# 这里生成的 unique_x_labels 里面的元素，和下面 source 里的 'x_axis_str' 绝对一模一样
-unique_x_labels = filtered_df['x_axis_str'].unique().tolist()
+    scatter = p.circle(x='x_axis_str', y='Price', size=18, source=source,
+                       color=color_map, legend_field='Brand', fill_alpha=0.7)
 
-# 生成供 Bokeh 调用的数据源
-source = ColumnDataSource(filtered_df)
-
-# ==========================================
-
-# 颜色映射
-brands_list = filtered_df['Brand'].unique().tolist()
-color_palette = (Category20[20] * 2)[:len(brands_list)] if brands_list else []
-color_map = factor_cmap('Brand', palette=color_palette, factors=brands_list)
-
-# 创建图表，严格传入唯一的 x_range 列表
-p = figure(
-    x_range=unique_x_labels, 
-    height=650, 
-    sizing_mode="stretch_width",
-    title="💡 提示：鼠标悬停在点上查看产品大图",
-    toolbar_location="right",
-    tools="pan,wheel_zoom,box_zoom,reset"
-)
-
-# 绘制散点，x 坐标严格使用我们刚刚生成的 'x_axis_str' 列
-scatter = p.circle(
-    x='x_axis_str', 
-    y='Price', 
-    size=18, 
-    source=source,
-    color=color_map, 
-    legend_field='Brand', 
-    fill_alpha=0.7, 
-    line_color="white"
-)
-
-hover = HoverTool(renderers=[scatter])
-hover.tooltips = """
-<div style="width: 260px; background: white; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
-    <div style="text-align:center; margin-bottom: 8px;">
-        <img src="@{URL of Image}" style="max-width: 180px; max-height: 180px; border-radius: 5px;">
+    # 悬停提示
+    hover = HoverTool(renderers=[scatter])
+    hover.tooltips = """
+    <div style="width: 260px; background: white; padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+        <img src="@{URL of Image}" style="width: 100%; max-height: 150px; object-fit: contain; margin-bottom: 5px;">
+        <div style="font-weight: bold; color: #1f77b4;">@{Brand}</div>
+        <div>Price: <span style="color:red;">$@{Price}</span></div>
+        <div>Capacity: @{Capacity/mAh}</div>
+        <div>Connect: @{Connect Type}</div>
     </div>
-    <div style="font-size: 14px; font-weight: bold; color: #1f77b4; text-align: center;">@{Brand}</div>
-    <div style="font-size: 12px; text-align: center; color: #666; margin-bottom: 8px;">@{Model Number}</div>
-    <div style="font-size: 12px; border-top: 1px solid #eee; padding-top: 8px;">
-        <b>💰 Price:</b> <span style="color: #d62728; font-weight: bold;">$@{Price}</span><br>
-        <b>🔋 Capacity:</b> @{Capacity/mAh}<br>
-        <b>🔌 Connect:</b> @{Connect Type}<br>
-        <b>⚡ Fast Charge:</b> @{Fast charging}<br>
-        <b>📶 Wireless:</b> @{Wireless}<br>
-        <b>⭐ Rating:</b> @{Rating} (@{Number of Reviews})<br>
-        <b>📦 Size/Weight:</b> @{Size} / @{Weight}<br>
-        <b>🏢 Sold by:</b> @{Sold by}<br>
-    </div>
-</div>
-"""
-p.add_tools(hover)
+    """
+    p.add_tools(hover)
+    
+    st.bokeh_chart(p, use_container_width=True)
 
-p.xaxis.axis_label = "Capacity (mAh)"
-p.yaxis.axis_label = "Price (USD)"
-p.legend.title = "Brands (Click to hide)"
-p.legend.label_text_font_size = "9pt"
-p.legend.click_policy = "hide"
-
-st.bokeh_chart(p, use_container_width=True)
+# --- 无论是否有图表，始终显示底部的原始数据预览 ---
+st.markdown("---")
+st.subheader("📊 原始数据预览")
+if not df.empty:
+    st.write(f"总共读取到 {len(df)} 行有效数据（已剔除价格或容量为空的行）")
+    st.dataframe(df)
+else:
+    st.error("无法显示预览：读取到的有效数据行为 0。请检查 Google Sheets 中 'Price' 和 'Capacity/mAh' 列是否填写正确。")
