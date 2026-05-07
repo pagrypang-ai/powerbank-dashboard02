@@ -4,27 +4,22 @@ from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, HoverTool
 from bokeh.transform import factor_cmap
 from bokeh.palettes import Category20
+import re
 
-# 1. 页面基本设置
 st.set_page_config(page_title="Power Bank Dashboard", layout="wide")
-st.title("🔋 充电宝市场价格与容量分析面板")
+st.title("🔋 充电宝对比可视化看板")
 
-# 2. 数据读取与清洗
 @st.cache_data(ttl=600)
 def load_data():
     sheet_url = "https://docs.google.com/spreadsheets/d/1fkMRXkdKVdYFN3d_Y7bhFtA1BGIUlA3xAG86UvvhT1w/export?format=csv&gid=0"
     df = pd.read_csv(sheet_url)
     
-    # 清洗价格列：提取数字
+    # 确保 Price 是数字
     if 'Price' in df.columns:
-        df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace('[\$,]', '', regex=True), errors='coerce')
+        df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce')
     
-    # 【核心修复】先删掉没有价格或没有容量的数据（没有 X 和 Y 坐标无法画图）
     df = df.dropna(subset=['Price', 'Capacity/mAh'])
-    
-    # 然后再将其他缺失的文本字段（如接口、尺寸等）填充为 'N/A'，确保悬停框显示整洁
-    df = df.fillna('N/A')
-    
+    df = df.fillna('')
     return df
 
 try:
@@ -33,90 +28,100 @@ except Exception as e:
     st.error(f"数据读取失败: {e}")
     st.stop()
 
-# 3. 侧边栏：刷新按钮与筛选器
-st.sidebar.header("⚙️ 控制面板")
+st.sidebar.header("⚙️ 选项")
 if st.sidebar.button("🔄 刷新数据"):
     st.cache_data.clear()
     st.rerun()
 
 if 'Brand' in df.columns:
-    brands = df['Brand'].unique().tolist()
-    # 过滤掉 'N/A' 等无效品牌
-    brands = [b for b in brands if b != 'N/A']
-    selected_brands = st.sidebar.multiselect("🏷️ 筛选品牌", options=brands, default=brands)
-    filtered_df = df[df['Brand'].isin(selected_brands)]
+    all_brands = sorted(df['Brand'].unique().tolist())
+    selected_brands = st.sidebar.multiselect("筛选品牌", options=all_brands, default=all_brands)
+    filtered_df = df[df['Brand'].isin(selected_brands)].copy()
 else:
     st.stop()
 
-# 4. 数据预处理 (为 Bokeh 绘图做准备)
-temp_df = filtered_df.copy()
+if filtered_df.empty:
+    st.warning("当前筛选无数据。")
+    st.stop()
 
-# 【优化点】提取容量里的纯数字并排序，确保 X 轴的容量是从小到大排列的
-temp_df['cap_num'] = pd.to_numeric(temp_df['Capacity/mAh'].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(0)
-temp_df = temp_df.sort_values('cap_num')
+# ==========================================
+# 核心修复区：严格匹配 x_range 与绘图坐标
+# ==========================================
 
-# 提取排好序的唯一容量值作为 X 轴标签
-x_range = temp_df['Capacity/mAh'].astype(str).unique().tolist()
-temp_df['Capacity/mAh_str'] = temp_df['Capacity/mAh'].astype(str)
+# 1. 强制生成一个绝对干净的纯字符串列，用于 X 轴。
+# 去除可能因为 pandas 自动转换而产生的 ".0" 尾缀（例如 10000.0 变成 10000）
+filtered_df['x_axis_str'] = filtered_df['Capacity/mAh'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
-# 将 DataFrame 转换为 Bokeh 需要的数据源格式
-source = ColumnDataSource(temp_df)
+# 2. 提取数字以便进行从小到大的逻辑排序
+def extract_num(s):
+    nums = re.findall(r'\d+', str(s))
+    return int(nums[0]) if nums else 0
 
-# 设置品牌颜色映射
-unique_brands = temp_df['Brand'].unique().tolist()
-palette = Category20[20] if len(Category20) > 0 else []
-# 确保颜色足够分配
-while len(palette) < len(unique_brands):
-    palette += Category20[20]
-color_map = factor_cmap('Brand', palette=palette[:max(1, len(unique_brands))], factors=unique_brands)
+filtered_df['cap_order'] = filtered_df['x_axis_str'].apply(extract_num)
+filtered_df = filtered_df.sort_values('cap_order')
 
-# 5. 绘制 Bokeh 散点图
-p = figure(x_range=x_range, height=700, sizing_mode="stretch_width", 
-           title="鼠标悬停在圆点上查看产品大图与详情",
-           toolbar_location="right", tools="pan,wheel_zoom,box_zoom,reset")
+# 3. 提取排序后唯一的纯文本列表，作为 Bokeh 的 x_range
+# 这里生成的 unique_x_labels 里面的元素，和下面 source 里的 'x_axis_str' 绝对一模一样
+unique_x_labels = filtered_df['x_axis_str'].unique().tolist()
 
-# 绘制散点
-scatter = p.circle(x='Capacity/mAh_str', y='Price', size=16, source=source, 
-                   color=color_map, legend_field='Brand', fill_alpha=0.8, 
-                   line_color="white", line_width=1.5)
+# 生成供 Bokeh 调用的数据源
+source = ColumnDataSource(filtered_df)
 
-# 优化图例和坐标轴显示
-p.legend.location = "top_left"
-p.legend.click_policy = "hide"  # 允许用户点击图例隐藏某个品牌
-p.legend.title = "Brand (Click to hide)"
-p.xaxis.axis_label = "电池容量 (Capacity / mAh)"
-p.yaxis.axis_label = "价格 (Price / USD)"
-p.xaxis.major_label_text_font_size = "10pt"
-p.yaxis.major_label_text_font_size = "10pt"
+# ==========================================
 
-# 6. 绝美的 HTML 悬停框 (HoverTool)
-# 注意：在 Bokeh 中，调用字段值使用 @{列名}
+# 颜色映射
+brands_list = filtered_df['Brand'].unique().tolist()
+color_palette = (Category20[20] * 2)[:len(brands_list)] if brands_list else []
+color_map = factor_cmap('Brand', palette=color_palette, factors=brands_list)
+
+# 创建图表，严格传入唯一的 x_range 列表
+p = figure(
+    x_range=unique_x_labels, 
+    height=650, 
+    sizing_mode="stretch_width",
+    title="💡 提示：鼠标悬停在点上查看产品大图",
+    toolbar_location="right",
+    tools="pan,wheel_zoom,box_zoom,reset"
+)
+
+# 绘制散点，x 坐标严格使用我们刚刚生成的 'x_axis_str' 列
+scatter = p.circle(
+    x='x_axis_str', 
+    y='Price', 
+    size=18, 
+    source=source,
+    color=color_map, 
+    legend_field='Brand', 
+    fill_alpha=0.7, 
+    line_color="white"
+)
+
 hover = HoverTool(renderers=[scatter])
 hover.tooltips = """
-<div style="width: 250px; background: white; padding: 10px; border-radius: 10px; box-shadow: 0px 4px 10px rgba(0,0,0,0.15);">
-    <div style="text-align:center;">
-        <img src="@{URL of Image}" style="width: 150px; border-radius: 8px; margin-bottom: 10px;">
-        <div style="font-weight: bold; font-size: 14px; color: #333; margin-bottom: 5px;">@{Brand} - @{Model Number}</div>
+<div style="width: 260px; background: white; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
+    <div style="text-align:center; margin-bottom: 8px;">
+        <img src="@{URL of Image}" style="max-width: 180px; max-height: 180px; border-radius: 5px;">
     </div>
-    <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eaeaea;">
-    <table style="width: 100%; font-size: 12px; color: #444; line-height: 1.6;">
-        <tr><td style="padding: 2px 0;"><b>💰 Price:</b></td><td style="text-align: right; color:#d9534f; font-weight:bold;">$@{Price}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>🔋 Capacity:</b></td><td style="text-align: right;">@{Capacity/mAh}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>🔌 Ports:</b></td><td style="text-align: right;">@{Connect Type}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>⚡ Fast Charge:</b></td><td style="text-align: right;">@{Fast charging}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>📶 Wireless:</b></td><td style="text-align: right;">@{Wireless}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>⭐ Rating:</b></td><td style="text-align: right;">@{Rating} (@{Number of Reviews})</td></tr>
-        <tr><td style="padding: 2px 0;"><b>📦 Size:</b></td><td style="text-align: right;">@{Size}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>⚖️ Weight:</b></td><td style="text-align: right;">@{Weight}</td></tr>
-        <tr><td style="padding: 2px 0;"><b>🛒 Sold by:</b></td><td style="text-align: right;">@{Sold by}</td></tr>
-    </table>
+    <div style="font-size: 14px; font-weight: bold; color: #1f77b4; text-align: center;">@{Brand}</div>
+    <div style="font-size: 12px; text-align: center; color: #666; margin-bottom: 8px;">@{Model Number}</div>
+    <div style="font-size: 12px; border-top: 1px solid #eee; padding-top: 8px;">
+        <b>💰 Price:</b> <span style="color: #d62728; font-weight: bold;">$@{Price}</span><br>
+        <b>🔋 Capacity:</b> @{Capacity/mAh}<br>
+        <b>🔌 Connect:</b> @{Connect Type}<br>
+        <b>⚡ Fast Charge:</b> @{Fast charging}<br>
+        <b>📶 Wireless:</b> @{Wireless}<br>
+        <b>⭐ Rating:</b> @{Rating} (@{Number of Reviews})<br>
+        <b>📦 Size/Weight:</b> @{Size} / @{Weight}<br>
+        <b>🏢 Sold by:</b> @{Sold by}<br>
+    </div>
 </div>
 """
 p.add_tools(hover)
 
-# 7. 在 Streamlit 中渲染
-st.bokeh_chart(p, use_container_width=True)
+p.xaxis.axis_label = "Capacity (mAh)"
+p.yaxis.axis_label = "Price (USD)"
+p.legend.title = "Brands (Click to hide)"
+p.legend.label_text_font_size = "9pt"
+p.legend.click_policy = "hide"
 
-# 底部数据预览表
-with st.expander("📊 查看底层原始数据"):
-    st.dataframe(filtered_df)
+st.bokeh_chart(p, use_container_width=True)
