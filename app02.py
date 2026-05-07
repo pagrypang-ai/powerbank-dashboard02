@@ -2,104 +2,143 @@ import streamlit as st
 import pandas as pd
 from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, HoverTool
-from bokeh.transform import factor_cmap
-from bokeh.palettes import Category20
-import re
+import numpy as np
 
-st.set_page_config(page_title="Power Bank Dashboard", layout="wide")
-st.title("🔋 充电宝对比可视化看板")
+# 页面配置
+st.set_page_config(page_title="产品动态对比看板", layout="wide")
 
-@st.cache_data(ttl=600)
-def load_data():
-    sheet_url = "https://docs.google.com/spreadsheets/d/1fkMRXkdKVdYFN3d_Y7bhFtA1BGIUlA3xAG86UvvhT1w/export?format=csv&gid=0"
-    df = pd.read_csv(sheet_url)
+# Google Sheets CSV 导出链接
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1fkMRXkdKVdYFN3d_Y7bhFtA1BGIUlA3xAG86UvvhT1w/export?format=csv&gid=0"
+
+@st.cache_data
+def load_data(url):
+    df = pd.read_csv(url)
     
-    # 【强制保护】即便你在原始数据排除了空格，这里加上 strip() 也是为了防止 CSV 导出时产生新空格
-    df.columns = df.columns.str.strip()
+    # 1. 数据预处理 - Price 转换为浮点数
+    # 去除可能存在的货币符号和逗号
+    if df['Price'].dtype == 'object':
+        df['Price'] = df['Price'].replace(r'[$,]', '', regex=True).astype(float)
     
-    # 转换价格为数字
-    if 'Price' in df.columns:
-        df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce')
+    # 2. 数据预处理 - Capacity/mAh 转换为离散排序字符串
+    # 确保 X 轴按数值大小排列而非字母排列
+    df['Capacity_Val'] = pd.to_numeric(df['Capacity/mAh'], errors='coerce').fillna(0)
+    df = df.sort_values(by='Capacity_Val')
+    df['Capacity/mAh'] = df['Capacity/mAh'].astype(str)
     
-    # 【检查点】如果这里删除了所有行，说明 'Price' 或 'Capacity/mAh' 匹配失败
-    df = df.dropna(subset=['Price', 'Capacity/mAh'])
-    df = df.fillna('')
     return df
 
-try:
-    df = load_data()
-except Exception as e:
-    st.error(f"数据读取失败: {e}")
-    st.stop()
+# --- 侧边栏交互 ---
+st.sidebar.header("控制面板")
 
-# --- 侧边栏 ---
-st.sidebar.header("⚙️ 选项")
-if st.sidebar.button("🔄 刷新数据"):
+# 刷新按钮
+if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# 品牌筛选逻辑
-if 'Brand' in df.columns:
-    all_brands = sorted(df['Brand'].unique().tolist())
-    selected_brands = st.sidebar.multiselect("筛选品牌", options=all_brands, default=all_brands)
-    filtered_df = df[df['Brand'].isin(selected_brands)].copy()
-else:
-    st.error(f"❌ 错误：在表格中没找到 'Brand' 列。当前列名有：{df.columns.tolist()}")
+# 加载数据
+try:
+    df_raw = load_data(SHEET_URL)
+except Exception as e:
+    st.error(f"数据加载失败，请检查 Google Sheets 链接是否已发布为 CSV。错误: {e}")
     st.stop()
 
-# 【关键排查】如果原始数据不显示，通常是 filtered_df 变成了空
-if filtered_df.empty:
-    st.warning("⚠️ 警告：当前筛选后的数据为空。请检查过滤器或原始表格中的价格/容量是否填写。")
-    # 即便为空，我们也继续往下走，看看底部的表格显示什么
+# 品牌筛选
+all_brands = df_raw['Brand'].unique().tolist()
+selected_brands = st.sidebar.multiselect("选择品牌", options=all_brands, default=all_brands)
+
+# 过滤数据
+df_filtered = df_raw[df_raw['Brand'].isin(selected_brands)].copy()
+
+# --- 主界面 ---
+st.title("🔋 产品对比看板 (Capacity vs Price)")
+st.markdown("基于实时 Google Sheets 数据构建。悬停在图片上查看详细参数。")
+
+if df_filtered.empty:
+    st.warning("请至少选择一个品牌。")
 else:
-    # ==========================================
-    # 核心：严格匹配 x_range
-    # ==========================================
-    # 1. 强制生成绘图专用的字符串列
-    filtered_df['x_axis_str'] = filtered_df['Capacity/mAh'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+    # 准备 Bokeh 数据源
+    source = ColumnDataSource(df_filtered)
 
-    # 2. 逻辑排序逻辑
-    def extract_num(s):
-        nums = re.findall(r'\d+', str(s))
-        return int(nums[0]) if nums else 0
-    filtered_df['cap_order'] = filtered_df['x_axis_str'].apply(extract_num)
-    filtered_df = filtered_df.sort_values('cap_order')
+    # 获取 X 轴所有可能的分类（用于排序）
+    x_range = df_raw['Capacity/mAh'].unique().tolist()
 
-    # 3. 严格提取 x_range 刻度
-    unique_x_labels = filtered_df['x_axis_str'].unique().tolist()
-    source = ColumnDataSource(filtered_df)
+    # 创建 Bokeh 图表
+    p = figure(
+        x_range=x_range,
+        height=600,
+        title="容量 vs 价格 散点图 (图片标记)",
+        x_axis_label="Capacity (mAh)",
+        y_axis_label="Price ($)",
+        tools="pan,wheel_zoom,box_zoom,reset,save",
+        active_scroll="wheel_zoom",
+        sizing_mode="stretch_width"
+    )
 
-    # 颜色与绘图
-    brands_list = filtered_df['Brand'].unique().tolist()
-    color_palette = (Category20[20] * 2)[:len(brands_list)]
-    color_map = factor_cmap('Brand', palette=color_palette, factors=brands_list)
+    # ================== 核心修改区域 ==================
+    
+    # 1. 绘制一个全透明的“感应散点”（用于可靠地触发悬停）
+    scatter_glyphs = p.circle(
+        x="Capacity/mAh", 
+        y="Price", 
+        source=source,
+        size=40,         # 感应区大小，可以根据图片大小微调
+        alpha=0,         # 设置为 0，完全透明不可见
+        hover_alpha=0.2, # 鼠标悬停时会微微泛灰，提示用户已选中
+        hover_color="gray"
+    )
 
-    p = figure(x_range=unique_x_labels, height=600, sizing_mode="stretch_width", 
-               title="鼠标悬停查看详情", toolbar_location="right")
+    # 2. 绘制图片散点
+    img_glyphs = p.image_url(
+        url="URL of Image", 
+        x="Capacity/mAh", 
+        y="Price", 
+        source=source,
+        anchor="center",
+        w=0.4, 
+        h=30,  # 稍微调高了图片像素，原先 15 像素可能会非常扁小
+        w_units="data",
+        h_units="screen" 
+    )
+    # ==================================================
 
-    scatter = p.circle(x='x_axis_str', y='Price', size=18, source=source,
-                       color=color_map, legend_field='Brand', fill_alpha=0.7)
-
-    # 悬停提示
-    hover = HoverTool(renderers=[scatter])
-    hover.tooltips = """
-    <div style="width: 260px; background: white; padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
-        <img src="@{URL of Image}" style="width: 100%; max-height: 150px; object-fit: contain; margin-bottom: 5px;">
-        <div style="font-weight: bold; color: #1f77b4;">@{Brand}</div>
-        <div>Price: <span style="color:red;">$@{Price}</span></div>
-        <div>Capacity: @{Capacity/mAh}</div>
-        <div>Connect: @{Connect Type}</div>
+    # 构建立体 HTML 悬停提示
+    tooltips = f"""
+    <div style="padding: 10px; background-color: #f5f5f5; border: 1px solid #ddd; border-radius: 5px; width: 300px; font-family: sans-serif;">
+        <div style="text-align: center; margin-bottom: 8px;">
+            <img src="@{{URL of Image}}" style="width: 100px; border-radius: 4px;">
+        </div>
+        <div style="font-size: 14px; font-weight: bold; color: #1f77b4; margin-bottom: 5px;">@{{Brand}} - @{{Model Number}}</div>
+        <hr>
+        <div style="font-size: 12px; line-height: 1.5;">
+            <b>💰 Price:</b> $@{{Price}} (Was: $@{{Was Price}})<br>
+            <b>⚡ Capacity:</b> @{{Capacity/mAh}} mAh<br>
+            <b>⭐ Rating:</b> @{{Rating}} (@{{Number of Reviews}} reviews)<br>
+            <b>📦 Sold by:</b> @{{Sold by}}<br>
+            <b>🚚 Pickup:</b> @{{Pickup or not}}<br>
+            <b>📐 Size/Weight:</b> @{{Size}} / @{{Weight}}<br>
+            <b>🔌 Connect:</b> @{{Connect Type}} (Wireless: @{{Wireless}})<br>
+            <b>🚀 Fast Charge:</b> @{{Fast charging}} | <b>🔋 Indicator:</b> @{{Battery Indicator}}<br>
+            <b>🛡️ Warranty:</b> @{{Warranty}}<br>
+            <b>📝 Note:</b> @{{Note}}<br>
+        </div>
+        <div style="margin-top: 10px; text-align: center;">
+            <a href="@{{Link}}" target="_blank" style="background-color: #4CAF50; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px; font-size: 11px;">View Product Link</a>
+        </div>
     </div>
     """
+
+    # 将 HoverTool 的 renderers 指定为透明感应区 (scatter_glyphs)
+    hover = HoverTool(renderers=[scatter_glyphs], tooltips=tooltips)
     p.add_tools(hover)
-    
+
+    # 美化图表
+    p.title.text_font_size = '16pt'
+    p.xaxis.major_label_orientation = 0.785 # 45度倾斜
+    p.background_fill_color = "#fafafa"
+
+    # 在 Streamlit 中展示
     st.bokeh_chart(p, use_container_width=True)
 
-# --- 无论是否有图表，始终显示底部的原始数据预览 ---
-st.markdown("---")
-st.subheader("📊 原始数据预览")
-if not df.empty:
-    st.write(f"总共读取到 {len(df)} 行有效数据（已剔除价格或容量为空的行）")
-    st.dataframe(df)
-else:
-    st.error("无法显示预览：读取到的有效数据行为 0。请检查 Google Sheets 中 'Price' 和 'Capacity/mAh' 列是否填写正确。")
+    # 展示原始数据表（可选）
+    with st.expander("查看筛选后的原始数据"):
+        st.dataframe(df_filtered.drop(columns=['Capacity_Val']), use_container_width=True)
