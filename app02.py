@@ -62,13 +62,13 @@ else:
     # 获取 X 轴所有可能的分类（用于排序）
     x_range = df_raw['Capacity/mAh'].unique().tolist()
 
-    # --- 修改 3：根据 Price 数据范围设置 Y 轴留白，防止图片被截断 ---
+    # Y 轴留白：给数据留出上下边距
     price_min = df_filtered['Price'].min()
     price_max = df_filtered['Price'].max()
-    price_padding = (price_max - price_min) * 0.2 if price_max != price_min else 10
+    price_margin = (price_max - price_min) * 0.25 if price_max != price_min else 20
     y_range = Range1d(
-        start=max(0, price_min - price_padding),
-        end=price_max + price_padding
+        start=max(0, price_min - price_margin),
+        end=price_max + price_margin
     )
 
     # 创建 Bokeh 图表
@@ -85,17 +85,17 @@ else:
     )
 
     # 绘制图片散点
-    # --- 修改 2：h_units 从 "screen" 改为 "data"，避免分类轴兼容性报错 ---
+    # 分类型 X 轴下，w/h 均使用 screen（像素）单位，避免 data 单位在离散轴上失效
     img_glyphs = p.image_url(
         url="URL of Image", 
         x="Capacity/mAh", 
         y="Price", 
         source=source,
         anchor="center",
-        w=0.4,
-        h=price_padding,           # 修改 2：高度与数据坐标系匹配
-        w_units="data",
-        h_units="data"             # 修改 2：统一使用 data 单位
+        w=60,           # 图片宽度（像素）
+        h=60,           # 图片高度（像素）
+        w_units="screen",
+        h_units="screen"
     )
 
     # --- 修改 1：新增透明散点层，作为 HoverTool 的触发器 ---
